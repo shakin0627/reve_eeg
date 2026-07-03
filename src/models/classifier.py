@@ -80,6 +80,7 @@ class ReveClassifier(nn.Module):
         attention_scores = torch.matmul(query_output, x.transpose(-1, -2)) / (self.encoder.embed_dim**0.5)
         attention_weights = torch.softmax(attention_scores, dim=-1)  # (B, 1, L)
         context = torch.matmul(attention_weights, x).squeeze(1)
+        # TODO: Monge Normalization
         if return_attn:
             return self.linear_head(context), attention_weights
 
@@ -93,6 +94,7 @@ class ReveClassifier(nn.Module):
         attention_scores = torch.matmul(query_output, x.transpose(-1, -2)) / (self.encoder.embed_dim**0.5)
         attention_weights = torch.softmax(attention_scores, dim=-1)
         context = torch.matmul(attention_weights, x).squeeze(1)
+        # TODO: Monge Normalization
         return self.linear_head(context), attention_weights, attn
 
 
