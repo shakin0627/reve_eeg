@@ -2,19 +2,71 @@
 Common dataloaders for different tasks.
 """
 
+from collections import defaultdict
 import os
 import pickle
 from os.path import join as pjoin
+from random import random
 
 import hydra
 import lmdb
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
-
+from torch.utils.data import Sampler
 from downstream_tasks.position_utils import load_positions
 
+################## Sampler ###################
+class PKBatchSampler(Sampler):
+    def __init__(self, domain_ids, P=16, K=4, seed=0):
+        self.P = P
+        self.K = K
+        self.epoch = 0
+        self.base_seed = seed
 
+        self.domain_to_indices = defaultdict(list)
+        for idx, d in enumerate(domain_ids):
+            self.domain_to_indices[d].append(idx)
+
+        self.domains = list(self.domain_to_indices.keys())
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def __iter__(self):
+        rng = random.Random(self.base_seed + self.epoch)
+
+        domain_pools = {
+            d: self._shuffled(idxs, rng) for d, idxs in self.domain_to_indices.items()
+        }
+        domain_cursor = {d: 0 for d in self.domains}
+
+        def remaining_batches(d):
+            return (len(domain_pools[d]) - domain_cursor[d]) // self.K
+
+        active_domains = [d for d in self.domains if remaining_batches(d) > 0]
+
+        while len(active_domains) >= self.P:
+            chosen = rng.sample(active_domains, self.P)
+            batch = []
+            for d in chosen:
+                start = domain_cursor[d]
+                batch.extend(domain_pools[d][start:start + self.K])
+                domain_cursor[d] += self.K
+            rng.shuffle(batch)
+            yield batch
+
+            active_domains = [d for d in self.domains if remaining_batches(d) > 0]
+
+    def _shuffled(self, idxs, rng):
+        idxs = idxs.copy()
+        rng.shuffle(idxs)
+        return idxs
+
+    def __len__(self):
+        total = sum(len(v) // self.K for v in self.domain_to_indices.values())
+        return total // self.P
+    
 ################## Datasets ##################
 
 
@@ -23,11 +75,25 @@ class LMDBDataset(Dataset):
         super(LMDBDataset, self).__init__()
         self.path = path
         self.scale_factor = scale_factor
+        self.mode = mode
 
-        # Open environment briefly to load keys, then close it to avoid issues with multi-processing
         env = lmdb.open(path, readonly=True, lock=False, readahead=True, meminit=False, max_readers=1024)
         with env.begin(write=False) as txn:
-            self.keys = pickle.loads(txn.get("__keys__".encode()))[mode]  # type: ignore
+            all_keys = pickle.loads(txn.get("__keys__".encode()))
+            self.keys = all_keys[mode]
+
+            if mode == "train":
+                by_domain = all_keys["train_by_domain"]         # {raw_sid: [keys...]}
+                domain_id_map = all_keys["train_domain_id_map"]  # {raw_sid: domain_id}
+
+                key_to_domain = {
+                    k: domain_id_map[raw_sid]
+                    for raw_sid, keys_ in by_domain.items()
+                    for k in keys_
+                }
+                self.domain_ids = [key_to_domain[k] for k in self.keys]
+            else:
+                self.domain_ids = None
         env.close()
 
         if positions is not None:
@@ -37,7 +103,7 @@ class LMDBDataset(Dataset):
         self.db = None
 
     def __len__(self):
-        return len((self.keys))
+        return len(self.keys)
 
     def _init_db(self):
         if self.db is None:
@@ -55,6 +121,7 @@ class LMDBDataset(Dataset):
         ret = {
             "sample": data / self.scale_factor,
             "label": label,
+            "domain_id": pair["domain_id"],
         }
         return ret
 
@@ -64,11 +131,13 @@ class LMDBDataset(Dataset):
     def collate(self, batch):
         x_data = np.array([x["sample"] for x in batch])
         y_label = np.array([x["label"] for x in batch])
+        domain_id = np.array([x["domain_id"] for x in batch])
         N = len(batch)
         positions = self.positions.repeat(N, 1, 1)
         return {
             "sample": self._to_tensor(x_data),
             "label": self._to_tensor(y_label).long(),
+            "domain_id": torch.from_numpy(domain_id).long(),
             "pos": positions,
         }
 
@@ -138,7 +207,7 @@ def get_data_loaders(config, loader_config, rank=None) -> dict[str, DataLoader]:
     train_sampler = None
     if rank is not None:
         import idr_torch  # noqa: PLC0415
-
+        raise NotImplementedError
         print("Using distributed sampler", rank, idr_torch.size)
         train_sampler = torch.utils.data.distributed.DistributedSampler(
             train_dataset,
@@ -146,17 +215,24 @@ def get_data_loaders(config, loader_config, rank=None) -> dict[str, DataLoader]:
             rank=rank,
             num_replicas=idr_torch.size,
         )
+    P = getattr(config, "pk_p", 16)
+    K = getattr(config, "pk_k", 4)
+    train_batch_sampler = PKBatchSampler(
+        domain_ids=train_dataset.domain_ids,
+        P=P,
+        K=K,
+        seed=config.seed,
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_sampler=train_batch_sampler,   
+        collate_fn=train_dataset.collate,
+        **loader_config,
+    )
 
     return {
-        "train": DataLoader(
-            train_dataset,
-            batch_size=config.batch_size,
-            collate_fn=train_dataset.collate,
-            shuffle=True,
-            generator=torch.Generator().manual_seed(config.seed),
-            sampler=train_sampler,
-            **loader_config,
-        ),
+        "train": train_loader,
         "val": DataLoader(
             val_dataset,
             batch_size=config.batch_size,
