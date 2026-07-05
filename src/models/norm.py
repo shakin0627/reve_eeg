@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import torch.nn as nn
 
@@ -32,6 +34,27 @@ def gaussian_monge_map_matrix(Sigma_k: torch.Tensor, Sigma_r: torch.Tensor,
     Sigma_k_inv_sqrt = inv_sqrtm_psd(Sigma_k, eps)
     inner = sqrtm_psd(Sigma_k_sqrt @ Sigma_r @ Sigma_k_sqrt, eps)
     return Sigma_k_inv_sqrt @ inner @ Sigma_k_inv_sqrt
+
+@torch.no_grad()
+def mahalanobis_cost(x: torch.Tensor, anchors: torch.Tensor,
+                      sigmas: torch.Tensor, eps_reg: float = 1e-5) -> torch.Tensor:
+    """
+    C_ik = (x_i - mu_k)^T Sigma_k^{-1} (x_i - mu_k)
+ 
+    x:       (B, d)
+    anchors: (K, d)     -> monge_layer.running_mu
+    sigmas:  (K, d, d)  -> monge_layer.running_sigma
+ 
+    returns: (B, K) cost matrix
+    """
+    diffs = x.unsqueeze(1) - anchors.unsqueeze(0)          # (B, K, d)
+ 
+    sigma_inv_sqrt = inv_sqrtm_psd(sigmas, eps_reg)         # (K, d, d)
+    sigma_inv = torch.einsum('kij,kjl->kil', sigma_inv_sqrt, sigma_inv_sqrt)
+ 
+    tmp = torch.einsum('bkd,kde->bke', diffs, sigma_inv)    # (B, K, d)
+    C = (tmp * diffs).sum(-1)                                # (B, K)
+    return C
 
 
 ################### Fixed-point iteration: Wasserstein Barycenter ###################
@@ -74,7 +97,8 @@ class MongeNormLayer(nn.Module):
 
     """
     def __init__(self, feature_dim: int, num_domains: int, momentum: float = 0.05,
-                 recompute_every: int = 50, eps: float = 1e-5):
+                 recompute_every: int = 50, eps: float = 1e-5, 
+                 num_train_samples: Optional[int] = None):
         super().__init__()
         self.d = feature_dim
         self.K = num_domains
@@ -90,14 +114,55 @@ class MongeNormLayer(nn.Module):
         self.register_buffer('mu_r', torch.zeros(feature_dim))
         self.register_buffer('sigma_r', torch.eye(feature_dim))
         self.register_buffer('A', torch.eye(feature_dim).unsqueeze(0).repeat(num_domains, 1, 1))
- 
+    
+        self.num_train_samples = num_train_samples
+        if num_train_samples is not None:
+            self.register_buffer('sorted_train_costs', torch.zeros(num_train_samples))
+            self.register_buffer('cost_dist_ready', torch.tensor(False))
         self._step_count = 0
     
     @property
     def ready(self) -> bool:
         """True once every domain has initialized"""
         return bool(self.domain_initialized.all())
- 
+    
+    @torch.no_grad()
+    def empirical_pit(self, d: torch.Tensor) -> torch.Tensor:
+        """
+        u_hat = (1 + #{i : c_(i) >= d}) / (N + 1)
+        """
+        if not bool(self.cost_dist_ready):
+            raise RuntimeError(
+                "sorted_train_costs not finalized -- call "
+                "finalize_train_cost_distribution() at the end of training first."
+            )
+        d = torch.as_tensor(d, device=self.sorted_train_costs.device,
+                            dtype=self.sorted_train_costs.dtype)
+        orig_shape = d.shape
+        flat = d.reshape(-1)
+        idx = torch.searchsorted(self.sorted_train_costs, flat, right=False)
+        N = self.sorted_train_costs.numel()
+        u_hat = (N - idx + 1).to(flat.dtype) / (N + 1)
+        return u_hat.reshape(orig_shape)
+    
+    @torch.no_grad()
+    def finalize_train_cost_distribution(self, feats: torch.Tensor, eps_reg: float = 1e-5) -> None:
+        if not hasattr(self, 'sorted_train_costs'):
+            raise RuntimeError(
+                "num_train_samples was not set at __init__; reconstruct "
+                "MongeNormLayer with num_train_samples=<N> first."
+            )
+        if feats.shape[0] != self.sorted_train_costs.numel():
+            raise ValueError(
+                f"got {feats.shape[0]} samples, expected "
+                f"{self.sorted_train_costs.numel()} (num_train_samples)."
+            )
+        C = mahalanobis_cost(feats, self.running_mu, self.running_sigma, eps_reg)  # (N, K)
+        d_vals = C.min(-1).values
+        sorted_costs, _ = torch.sort(d_vals)
+        self.sorted_train_costs.copy_(sorted_costs)
+        self.cost_dist_ready.fill_(True)
+        
     @torch.no_grad()
     def update_domain_stats(self, feats: torch.Tensor, domain_ids: torch.Tensor):
         """

@@ -8,6 +8,26 @@ def inv_sqrtm_psd(mat: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     eigvals = eigvals.clamp(min=eps)
     return eigvecs @ torch.diag_embed(eigvals.rsqrt()) @ eigvecs.transpose(-1, -2)
 
+@torch.no_grad()
+def mahalanobis_cost(x: torch.Tensor, anchors: torch.Tensor,
+                      sigmas: torch.Tensor, eps_reg: float = 1e-5) -> torch.Tensor:
+    """
+    C_ik = (x_i - mu_k)^T Sigma_k^{-1} (x_i - mu_k)
+ 
+    x:       (B, d)
+    anchors: (K, d)     -> monge_layer.running_mu
+    sigmas:  (K, d, d)  -> monge_layer.running_sigma
+ 
+    returns: (B, K) cost matrix
+    """
+    diffs = x.unsqueeze(1) - anchors.unsqueeze(0)          # (B, K, d)
+ 
+    sigma_inv_sqrt = inv_sqrtm_psd(sigmas, eps_reg)         # (K, d, d)
+    sigma_inv = torch.einsum('kij,kjl->kil', sigma_inv_sqrt, sigma_inv_sqrt)
+ 
+    tmp = torch.einsum('bkd,kde->bke', diffs, sigma_inv)    # (B, K, d)
+    C = (tmp * diffs).sum(-1)                                # (B, K)
+    return C
 
 #################### Dual Uncertainty #######################
 def combine_lambda(lam_A, lam_B, strategy: str = 'geometric'):
@@ -35,29 +55,8 @@ class SinkhornOT:
         self.verbose = verbose
 
     @torch.no_grad()
-    def _compute_cost(self, x: torch.Tensor, anchors: torch.Tensor,
-                       sigmas: torch.Tensor = None, eps_reg: float = 1e-5):
-        """
-        x: (B, d), anchors: (K, d) = running_mu
-        sigmas: (K, d, d) = running_sigma
-        """
-        # mahalanobis: C_ik = (x_i - mu_k)^T Sigma_k^{-1} (x_i - mu_k)
-        K = anchors.shape[0]
-        diffs = x.unsqueeze(1) - anchors.unsqueeze(0)     # (B, K, d)
-
-        # Sigma_k^{-1} = (Sigma_k^{-1/2})^2
-        sigma_inv_sqrt = inv_sqrtm_psd(sigmas, eps_reg)   # (K, d, d)
-        sigma_inv = torch.einsum('kij,kjl->kil', sigma_inv_sqrt, sigma_inv_sqrt)
-
-        # (B,K,d) x (K,d,d) -> (B,K,d)
-        tmp = torch.einsum('bkd,kde->bke', diffs, sigma_inv)
-        C = (tmp * diffs).sum(-1)
-        return C
-    
-    @torch.no_grad()
     def solve(self, x: torch.Tensor, anchors: torch.Tensor,
               sigmas: torch.Tensor = None,
-              source_prior: torch.Tensor = None,
               eps_scale: bool = True):
         """
         x: (B, d)
@@ -70,13 +69,11 @@ class SinkhornOT:
 
         log_a = torch.full((B,), -float(torch.log(torch.tensor(B, dtype=dtype))),
                             device=device, dtype=dtype)
-        if source_prior is None:
-            log_b = torch.full((K,), -float(torch.log(torch.tensor(K, dtype=dtype))),
+        
+        log_b = torch.full((K,), -float(torch.log(torch.tensor(K, dtype=dtype))),
                                 device=device, dtype=dtype)
-        else:
-            log_b = source_prior.clamp_min(1e-12).log()
 
-        C = self._compute_cost(x, anchors, sigmas)  # (B, K)
+        C = mahalanobis_cost(x, anchors, sigmas)  # (B, K)
 
         eps = self.epsilon
         if eps_scale:
@@ -113,3 +110,33 @@ class SinkhornOT:
         batch_cost = (plan * C).sum() / plan.sum()
 
         return row_weights, batch_cost
+    
+######################### Gibbs softmax (B = 1, online streaming) ############
+def softmax_transport_weights(x: torch.Tensor, anchors: torch.Tensor,
+                               sigmas: torch.Tensor, alpha: float = 1.0,
+                               eps_reg: float = 1e-5):
+    """
+    Unbalanced / single-marginal Gibbs weighting for the B=1 streaming path.
+ 
+    tau = alpha * d
+ 
+    x:       (B, d)   
+    alpha:   calibrated scalar multiplier on tau = alpha * d
+ 
+    returns:
+        weights:  (B, K)  domain-attribution weights, softmax over -cost/tau
+        lambda_B: (B,)    1 - normalized entropy of weights
+    """
+    d = anchors.shape[-1]
+    tau = alpha * d
+ 
+    C = mahalanobis_cost(x, anchors, sigmas, eps_reg)   # (B, K)
+    K = C.shape[-1]
+ 
+    weights = torch.softmax(-C / tau, dim=-1)            # (B, K)
+ 
+    H = -(weights * (weights.clamp_min(1e-12)).log()).sum(-1)   # (B,)
+    lambda_B = 1.0 - H / torch.log(torch.tensor(float(K), device=C.device, dtype=C.dtype))
+ 
+    return weights, lambda_B
+ 
