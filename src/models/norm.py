@@ -98,7 +98,7 @@ class MongeNormLayer(nn.Module):
     """
     def __init__(self, feature_dim: int, num_domains: int, momentum: float = 0.05,
                  recompute_every: int = 50, eps: float = 1e-5, 
-                 num_train_samples: Optional[int] = None):
+                 num_train_samples: int = None):
         super().__init__()
         self.d = feature_dim
         self.K = num_domains
@@ -116,9 +116,8 @@ class MongeNormLayer(nn.Module):
         self.register_buffer('A', torch.eye(feature_dim).unsqueeze(0).repeat(num_domains, 1, 1))
     
         self.num_train_samples = num_train_samples
-        if num_train_samples is not None:
-            self.register_buffer('sorted_train_costs', torch.zeros(num_train_samples))
-            self.register_buffer('cost_dist_ready', torch.tensor(False))
+        self.register_buffer('sorted_train_costs', torch.zeros(num_train_samples))
+        self.register_buffer('cost_dist_ready', torch.tensor(False))
         self._step_count = 0
     
     @property

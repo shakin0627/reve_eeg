@@ -6,7 +6,7 @@ from collections import defaultdict
 import os
 import pickle
 from os.path import join as pjoin
-from random import random
+import random
 
 import hydra
 import lmdb

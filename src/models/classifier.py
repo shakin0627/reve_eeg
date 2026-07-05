@@ -7,6 +7,7 @@ from torch import nn
 from models.backbone import RMSNorm
 from models.encoder import REVE
 from utils.initialization import ConfigInit, init_cls
+from models.norm import MongeNormLayer
 
 
 H_DIM_MAP = {
@@ -23,6 +24,11 @@ class ReveClassifier(nn.Module):
         n_classes,
         dropout,
         pooling="last",
+        use_monge_norm=True,
+        num_domains=None,
+        monge_momentum=0.05,
+        monge_recompute_every=50,
+        monge_num_train_samples=None,
         **kwargs,
     ):
         super().__init__()
@@ -51,11 +57,39 @@ class ReveClassifier(nn.Module):
 
         self.pooling = pooling
 
+        # --- Monge normalization setup ---
+        self.use_monge_norm = use_monge_norm
+        if self.use_monge_norm:
+            assert pooling in ["last", "all"], (
+                f"use_monge_norm=True not supported for pooling={pooling}; "
+                "MongeNormLayer is only wired into the 'last'/'all' branches."
+            )
+            assert num_domains is not None, "num_domains required when use_monge_norm=True"
+            self.monge_norm = MongeNormLayer(
+                feature_dim=self.encoder.embed_dim,
+                num_domains=num_domains,
+                momentum=monge_momentum,
+                recompute_every=monge_recompute_every,
+                num_train_samples=monge_num_train_samples,
+            )
+
+
     def init_weights(self, config_megatron: ConfigInit):
         init_cls(self, config_megatron)
         print("Classifier weights initialized")
 
-    def forward(self, x, pos, return_attn=False):
+    def _apply_monge_norm(self, context, domain_ids=None, ot_weights=None, lam=None):
+        if not self.use_monge_norm:
+            return context
+        if self.training:
+            assert domain_ids is not None, "domain_ids required in train mode"
+            return self.monge_norm(context, mode='train', domain_ids=domain_ids)
+        else:
+            assert ot_weights is not None and lam is not None, \
+                "ot_weights and lam required in test mode"
+            return self.monge_norm(context, mode='test', ot_weights=ot_weights, lam=lam)
+
+    def forward(self, x, pos, return_attn=False, domain_ids=None, ot_weights=None, lam=None):
         if self.pooling == "last_avg":
             x = self.encoder(x, pos, False)
             x = x.mean(dim=1)
@@ -81,12 +115,14 @@ class ReveClassifier(nn.Module):
         attention_weights = torch.softmax(attention_scores, dim=-1)  # (B, 1, L)
         context = torch.matmul(attention_weights, x).squeeze(1)
         # TODO: Monge Normalization
+        context = self._apply_monge_norm(context, domain_ids=domain_ids,
+                                          ot_weights=ot_weights, lam=lam)
         if return_attn:
             return self.linear_head(context), attention_weights
 
         return self.linear_head(context)
 
-    def forward_attn(self, x, pos):
+    def forward_attn(self, x, pos, domain_ids=None, ot_weights=None, lam=None):
         # returns prediction, query attention weights, and all intermediate attention weights
         x, attn = self.encoder.forward_attn(x, pos)
         b = x.shape[0]
@@ -95,6 +131,8 @@ class ReveClassifier(nn.Module):
         attention_weights = torch.softmax(attention_scores, dim=-1)
         context = torch.matmul(attention_weights, x).squeeze(1)
         # TODO: Monge Normalization
+        context = self._apply_monge_norm(context, domain_ids=domain_ids,
+                                          ot_weights=ot_weights, lam=lam)
         return self.linear_head(context), attention_weights, attn
 
 

@@ -20,7 +20,7 @@ linear_probing:
   n_epochs: 20
   patience: 10
   warmup_epochs: 3
-  mixup: True
+  mixup: False
   dropout: 0.05 
   optimizer:
     lr: 5e-3
@@ -31,7 +31,7 @@ fine_tuning:
   n_epochs: 200
   patience: 10
   warmup_epochs: 5
-  mixup: True
+  mixup: False 
   dropout: 0.1
   optimizer:
     lr: 1e-4
