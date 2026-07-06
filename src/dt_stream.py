@@ -21,12 +21,18 @@ register_resolvers()
 
 # python src/dt_stream.py --config-name local_config.yaml --config-dir .
 
-def _infer_num_train_samples(checkpoint_path: str) -> int:
+def _infer_monge_shapes(checkpoint_path: str) -> dict:
     state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    key = "monge_norm.sorted_train_costs"
-    if key not in state_dict:
-        return None  
-    return state_dict[key].numel()
+    mu_key = "monge_norm.running_mu"
+    cost_key = "monge_norm.sorted_train_costs"
+
+    if mu_key not in state_dict:
+        return {"num_domains": None, "num_train_samples": None}
+
+    return {
+        "num_domains": state_dict[mu_key].shape[0],
+        "num_train_samples": state_dict[cost_key].numel() if cost_key in state_dict else None,
+    }
 
 class OnlineAdaptationEvaluator:
     """
@@ -161,7 +167,7 @@ def main(args):
         print(f"Error: Checkpoint not found at {checkpoint_path}")
         return
 
-    inferred_num_train_samples = _infer_num_train_samples(checkpoint_path)
+    monge_shapes = _infer_monge_shapes(checkpoint_path)
 
     model = ReveClassifier(
         encoder=encoder,
@@ -170,10 +176,10 @@ def main(args):
         pooling=args.task.classifier.pooling,
         out_shape=out_shape,
         use_monge_norm=args.task.classifier.get("use_monge_norm", True),
-        num_domains=args.task.classifier.get("num_domains", None),
+        num_domains=monge_shapes["num_domains"],
         monge_momentum=args.task.classifier.get("monge_momentum", 0.05),
         monge_recompute_every=args.task.classifier.get("monge_recompute_every", 50),
-        monge_num_train_samples=inferred_num_train_samples,
+        monge_num_train_samples=monge_shapes["num_train_samples"],
     )
 
     checkpoint_path = args.get("checkpoint_path", "model_best.pth")
