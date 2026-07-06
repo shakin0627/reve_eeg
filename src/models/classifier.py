@@ -89,7 +89,8 @@ class ReveClassifier(nn.Module):
                 "ot_weights and lam required in test mode"
             return self.monge_norm(context, mode='test', ot_weights=ot_weights, lam=lam)
 
-    def forward(self, x, pos, return_attn=False, domain_ids=None, ot_weights=None, lam=None):
+    def forward(self, x, pos, return_attn=False, domain_ids=None, ot_weights=None, 
+                lam=None, return_features=False, skip_monge_norm=False):
         if self.pooling == "last_avg":
             x = self.encoder(x, pos, False)
             x = x.mean(dim=1)
@@ -114,13 +115,23 @@ class ReveClassifier(nn.Module):
         attention_scores = torch.matmul(query_output, x.transpose(-1, -2)) / (self.encoder.embed_dim**0.5)
         attention_weights = torch.softmax(attention_scores, dim=-1)  # (B, 1, L)
         context = torch.matmul(attention_weights, x).squeeze(1)
-        # TODO: Monge Normalization
-        context = self._apply_monge_norm(context, domain_ids=domain_ids,
-                                          ot_weights=ot_weights, lam=lam)
-        if return_attn:
-            return self.linear_head(context), attention_weights
+        raw_context = context
+        if skip_monge_norm:
+            context = raw_context
+        else:
+            context = self._apply_monge_norm(context, domain_ids=domain_ids,
+                                            ot_weights=ot_weights, lam=lam)
+            
+        out = self.linear_head(context)
 
-        return self.linear_head(context)
+        if return_attn and return_features:
+            return out, attention_weights, raw_context
+        if return_features:
+            return out, raw_context
+        if return_attn:
+            return out, attention_weights
+        
+        return out
 
     def forward_attn(self, x, pos, domain_ids=None, ot_weights=None, lam=None):
         # returns prediction, query attention weights, and all intermediate attention weights

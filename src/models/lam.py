@@ -8,11 +8,10 @@ class LambdaController:
     def __init__(self, monge_layer: MongeNormLayer, momentum: float = 0.05):
         self.layer = monge_layer
         self.momentum = momentum
-        self.lambda_A = torch.tensor(0.0)
+        self.lambda_A = torch.zeros((), device=monge_layer.running_mu.device)
 
     def reset(self):
-        """Call at the start of each new subject's test stream."""
-        self.lambda_A = torch.tensor(0.0, device=self.lambda_A.device)
+        self.lambda_A = torch.zeros((), device=self.lambda_A.device)
 
     @torch.no_grad()
     def step(self, C: torch.Tensor) -> torch.Tensor:

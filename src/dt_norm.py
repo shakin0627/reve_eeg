@@ -15,9 +15,11 @@ from tqdm import tqdm
 from transformers import AutoModel
 
 from configs.resolver import register_resolvers
-from downstream_tasks.dataloaders import get_data_loaders
+from downstream_tasks.dataloaders import get_data_loaders, get_sequential_train_loader
 from models.classifier import ReveClassifier
 from models.encoder import REVE
+from models.tta import _monge_tta_forward
+from models.tta import finalize_cost_distribution
 from utils.model_utils import (
     freeze_model,
     get_flattened_output_dim,
@@ -234,10 +236,6 @@ def train_one_epoch(  # noqa: PLR0913
         scaler.update()
 
         if use_monge_norm and raw_feats is not None:
-            # TODO: after the optimizer step, update MongeNormLayer's running
-            # per-domain statistics and (periodically) refresh the transport
-            # maps, using this batch's RAW (pre-transform) features:
-            #
             with torch.no_grad():
                 model.monge_norm.update_domain_stats(raw_feats.detach().float(), domain_ids)
                 model.monge_norm.refresh_transport_maps(force=False)
@@ -254,14 +252,17 @@ def train_one_epoch(  # noqa: PLR0913
 
     return sum(losses) / len(losses)
 
-
 def test(
     model: ReveClassifier,
     test_loader: torch.utils.data.DataLoader,
     device="cuda",
     binary=False,
     amp_dtype=torch.float16,
+    lam_mode="static",
 ):
+    """
+    val : OT soft assignment
+    """
     score, count = 0, 0
     model.eval()
     y_decisions = []
@@ -286,7 +287,8 @@ def test(
             )
             # Plain eval metrics: no test-time adaptation here. TTA evaluation
             # goes through OnlineAdaptationEvaluator separately.
-            output = model(data, pos, skip_monge_norm=True)
+            output = _monge_tta_forward(model, data, pos, lam_mode=lam_mode)
+
             decisions = torch.argmax(output, dim=1)
             score += (decisions == target).int().sum().item()
             count += target.shape[0]
@@ -307,16 +309,6 @@ def test(
         return acc, balanced_acc, cohen_kappa, f1, auroc, auc_pr
     else:
         return acc, balanced_acc, cohen_kappa, f1, 0, 0
-    
-def test_with_tta(
-    model: ReveClassifier,
-    test_loader: torch.utils.data.DataLoader,
-    device="cuda",
-    binary=False,
-    amp_dtype=torch.float16,
-):
-    raise NotImplementedError
-    
 
 
 @hydra.main(version_base=None, config_name="config_dt_norm", config_path="configs")
@@ -391,6 +383,10 @@ def main(args):  # noqa: C901, PLR0912, PLR0915
 
     dropout = args.get("dropout", 0.0)
 
+    _probe_dataset = hydra.utils.instantiate(args.task.data_loader.dataset, mode="train")
+    monge_num_train_samples = len(_probe_dataset)
+    print(f"Auto-detected {monge_num_train_samples} training samples for MongeNormLayer cost buffer")
+
     model = ReveClassifier(
         encoder=encoder,
         n_classes=args.task.classifier.n_classes,
@@ -401,7 +397,7 @@ def main(args):  # noqa: C901, PLR0912, PLR0915
         num_domains=args.task.classifier.get("num_domains", None),
         monge_momentum=args.task.classifier.get("monge_momentum", 0.05),
         monge_recompute_every=args.task.classifier.get("monge_recompute_every", 50),
-        monge_num_train_samples=args.task.classifier.get("monge_num_train_samples", None),
+        monge_num_train_samples=monge_num_train_samples,
     )
 
     if cls_query_token is not None:
@@ -457,7 +453,10 @@ def main(args):  # noqa: C901, PLR0912, PLR0915
             data_loaders["test"],
             stage_name=mode,
         )
-
+    
+    torch_dtype = dtype_map.get(args.trainer.get("torch_dtype", "fp32"))
+    finalize_loader = get_sequential_train_loader(args.task.data_loader, args.loader)
+    finalize_cost_distribution(model, finalize_loader, device, torch_dtype)
     # Save model
     target_dir = os.getcwd()  # Hydra changes CWD
     torch.save(model.state_dict(), pjoin(target_dir, "model_final.pth"))

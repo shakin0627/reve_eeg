@@ -48,7 +48,10 @@ files_dict = {
 }
 
 # raw_subject_id
-raw_subject_id_map = {fname: idx for idx, fname in enumerate(files)}
+raw_subject_id_map = {
+    sid: idx
+    for idx, sid in enumerate(subject_keys)
+}
 
 # domain_id
 train_domain_id_map = {fname: k for k, fname in enumerate(files_dict["train"])}

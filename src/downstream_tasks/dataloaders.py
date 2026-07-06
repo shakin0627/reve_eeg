@@ -181,7 +181,22 @@ class NeuroLMDataset(Dataset):
             "pos": self.positions.repeat(len(batch), 1, 1),
         }
 
-
+def get_sequential_train_loader(config, loader_config) -> DataLoader:
+    """
+    A plain, shuffle=False, drop_last=False pass over the *entire* training
+    set, used only for finalize_train_cost_distribution() after training
+    completes. 
+    """
+    splits = config.get("splits", ["train", "val", "test"])
+    train_dataset = hydra.utils.instantiate(config.dataset, mode=splits[0])
+    return DataLoader(
+        train_dataset,
+        batch_size=config.batch_size,
+        collate_fn=train_dataset.collate,
+        shuffle=False,
+        drop_last=False,
+        **loader_config,
+    )
 ###############################################################################################
 
 

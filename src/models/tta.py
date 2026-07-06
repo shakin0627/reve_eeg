@@ -1,4 +1,6 @@
 import torch 
+import tqdm
+from models.classifier import ReveClassifier
 
 #################### Helper Function #######################
 def inv_sqrtm_psd(mat: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -44,6 +46,101 @@ def combine_lambda(lam_A, lam_B, strategy: str = 'geometric'):
     else:
         raise ValueError(strategy)
     
+########################## tta #############################
+@torch.no_grad()
+def finalize_cost_distribution(
+    model: ReveClassifier,
+    train_loader: torch.utils.data.DataLoader,
+    device: str = "cuda",
+    amp_dtype: torch.dtype = torch.float16,
+):
+    """
+    Must be called AFTER all training stages (lp/ft) are complete
+    """
+    assert getattr(model, "use_monge_norm", False), (
+        "finalize_cost_distribution is a no-op for use_monge_norm=False models; "
+        "don't call it in that case."
+    )
+    assert model.monge_norm.ready, (
+        "monge_norm domains not fully initialized (domain_initialized not all "
+        "True) -- something is wrong if training has completed."
+    )
+
+    model.eval()
+    ctx = torch.amp.autocast(device_type="cuda", dtype=amp_dtype) if device == "cuda" else nullcontext()
+
+    all_feats = []
+    pbar = tqdm(train_loader, desc="Finalizing train cost distribution")
+    for batch_data in pbar:
+        with ctx:
+            if isinstance(batch_data, dict):
+                data = batch_data["sample"]
+                pos = batch_data["pos"]
+            else:
+                data, _, pos = batch_data[:3]
+
+            data = data.to(device, non_blocking=True)
+            pos = pos.to(device, non_blocking=True)
+
+            _, raw_context = model(data, pos, skip_monge_norm=True, return_features=True)
+            all_feats.append(raw_context.detach().float().cpu())
+
+    all_feats = torch.cat(all_feats, dim=0)
+
+    expected = model.monge_norm.sorted_train_costs.numel()
+    if all_feats.shape[0] != expected:
+        raise RuntimeError(
+            f"Sequential train loader yielded {all_feats.shape[0]} samples, "
+            f"but monge_num_train_samples={expected} was set at model "
+        )
+
+    model.monge_norm.finalize_train_cost_distribution(all_feats.to(device))
+
+
+@torch.no_grad()
+def _monge_tta_forward(model, data, pos, lam_mode, alpha=1.0, eps_reg=1e-5, strategy="geometric"):
+    """
+    lam_mode:
+      'off'            -- skip MongeNorm（baseline 0 / Pure backbone）
+      'static'         -- OT soft-assignment，lam = 1（baseline 1：Static）
+      'lambda_b_only'  -- lam_A = 1，lam_B (Sinkhorn-Gibbs transport-plan entrophy)
+      'full'           -- lam_A、lam_B batch-wise
+    """
+    use_monge = getattr(model, "use_monge_norm", False)
+
+    if lam_mode == "off" or not use_monge:
+        return model(data, pos, skip_monge_norm=True)
+
+    if not model.monge_norm.ready:
+        return model(data, pos, skip_monge_norm=True)
+
+    _, raw_context = model(data, pos, skip_monge_norm=True, return_features=True)
+
+    ot_weights, lam_B = softmax_transport_weights(
+        raw_context, model.monge_norm.running_mu, model.monge_norm.running_sigma,
+        alpha=alpha, eps_reg=eps_reg,
+    )
+
+    if lam_mode == "static":
+        lam = torch.ones_like(lam_B)
+    elif lam_mode == "lambda_b_only":
+        lam = combine_lambda(1.0, lam_B, strategy=strategy)
+    elif lam_mode == "full":
+        if not bool(model.monge_norm.cost_dist_ready):
+            raise RuntimeError(
+                "lam_mode='full' need to be called after the end of the training "
+                "finalize_train_cost_distribution()"
+            )
+        C = mahalanobis_cost(raw_context, model.monge_norm.running_mu,
+                              model.monge_norm.running_sigma, eps_reg)
+        d_t = C.min(-1).values
+        u_hat = model.monge_norm.empirical_pit(d_t)
+        lam_A_instantaneous = 1.0 - u_hat          # (B,)，per-sample
+        lam = combine_lambda(lam_A_instantaneous, lam_B, strategy=strategy)
+    else:
+        raise ValueError(f"unknown lam_mode: {lam_mode}")
+
+    return model(data, pos, ot_weights=ot_weights, lam=lam)
 
 ######################### OT ###############################
 class SinkhornOT:
@@ -139,4 +236,6 @@ def softmax_transport_weights(x: torch.Tensor, anchors: torch.Tensor,
     lambda_B = 1.0 - H / torch.log(torch.tensor(float(K), device=C.device, dtype=C.dtype))
  
     return weights, lambda_B
- 
+
+
+
