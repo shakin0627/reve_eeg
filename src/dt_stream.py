@@ -10,7 +10,7 @@ from sklearn.metrics import balanced_accuracy_score, cohen_kappa_score, f1_score
 from tqdm import tqdm
 
 from configs.resolver import register_resolvers
-from downstream_tasks.dataloaders import get_streaming_eval_loader
+from downstream_tasks.dataloader_streaming import get_streaming_eval_loader
 from models.classifier import ReveClassifier
 from models.encoder import REVE
 from models.lam import LambdaController  

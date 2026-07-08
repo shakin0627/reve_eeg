@@ -1,6 +1,7 @@
 import torch 
 import tqdm
 from models.classifier import ReveClassifier
+from contextlib import nullcontext
 
 #################### Helper Function #######################
 def inv_sqrtm_psd(mat: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:

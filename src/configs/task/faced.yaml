@@ -4,7 +4,7 @@ duration: 10
 
 classifier:
   n_classes: 9
-  pooling: "no"
+  pooling: "last"
 
 data_loader:
   dataset:
@@ -29,7 +29,7 @@ linear_probing:
 
 fine_tuning:
   n_epochs: 200
-  patience: 10
+  patience: 50
   warmup_epochs: 5
   mixup: False 
   dropout: 0.1

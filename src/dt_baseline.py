@@ -174,7 +174,7 @@ def train_one_epoch(  # noqa: PLR0913
     torch_dtype = dtype_map.get(dtype, torch.float32)
     ctx = torch.amp.autocast(device_type="cuda", dtype=torch_dtype) if "16" in dtype else nullcontext()
 
-    use_monge_norm = getattr(model, "use_monge_norm", True)
+    use_monge_norm = getattr(model, "use_monge_norm", False)
 
     if use_monge_norm and use_mixup:
         raise NotImplementedError(
@@ -258,7 +258,7 @@ def test(
     device="cuda",
     binary=False,
     amp_dtype=torch.float16,
-    lam_mode="static",
+    lam_mode="off",
 ):
     """
     val : OT soft assignment
@@ -396,7 +396,7 @@ def main(args):  # noqa: C901, PLR0912, PLR0915
         dropout=dropout,
         pooling=args.task.classifier.pooling,
         out_shape=out_shape,
-        use_monge_norm=args.task.classifier.get("use_monge_norm", True),
+        use_monge_norm=args.task.classifier.get("use_monge_norm", False),
         num_domains=num_domains,
         monge_momentum=args.task.classifier.get("monge_momentum", 0.05),
         monge_recompute_every=args.task.classifier.get("monge_recompute_every", 50),
@@ -459,10 +459,13 @@ def main(args):  # noqa: C901, PLR0912, PLR0915
     
     torch_dtype = dtype_map.get(args.trainer.get("torch_dtype", "fp32"))
     finalize_loader = get_sequential_train_loader(args.task.data_loader, args.loader)
-    finalize_cost_distribution(model, finalize_loader, device, torch_dtype)
+    if getattr(model, "use_monge_norm", False):
+        finalize_cost_distribution(model, finalize_loader, device, torch_dtype)
+    else:
+        print("Skipping finalize_cost_distribution: use_monge_norm=False")
     # Save model
     target_dir = os.getcwd()  # Hydra changes CWD
-    torch.save(model.state_dict(), pjoin(target_dir, "model_final.pth"))
+    torch.save(model.state_dict(), pjoin(target_dir, "baseline_final.pth"))
     print(f"Model saved to {target_dir}")
 
 

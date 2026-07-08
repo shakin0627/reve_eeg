@@ -14,6 +14,7 @@ mode: train # train, eval_only, debug
 
 pretrained_path: ${env:SCRATCH}/pretrained_models/reve_base.pth
 cache_dir: .cache
+data_root: data 
 
 #####################################################
 

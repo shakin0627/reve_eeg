@@ -54,7 +54,7 @@ raw_subject_id_map = {
 }
 
 # domain_id
-train_domain_id_map = {fname: k for k, fname in enumerate(files_dict["train"])}
+train_domain_id_map = {s: k for k, s in enumerate(train_subjects)}
 
 dataset = {
     "train": [],
@@ -81,6 +81,7 @@ for files_key, files_list in files_dict.items():
         for i, (samples, label) in enumerate(zip(eeg_, labels)):
             for j in range(3):
                 sample = samples[:, 10 * j : 10 * (j + 1), :]
+                sample = sample.reshape(sample.shape[0], -1)
                 sample_key = f"{file}-{i}-{j}"
                 data_dict = {
                     "sample": sample,
