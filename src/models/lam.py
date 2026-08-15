@@ -4,7 +4,7 @@ class LambdaController:
     """
     Online EMA controller for belief update
     """
-    from norm import MongeNormLayer
+    from .norm import MongeNormLayer
     def __init__(self, monge_layer: MongeNormLayer, momentum: float = 0.05):
         self.layer = monge_layer
         self.momentum = momentum

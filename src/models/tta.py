@@ -1,36 +1,8 @@
 import torch 
-import tqdm
+from tqdm import tqdm
 from models.classifier import ReveClassifier
 from contextlib import nullcontext
-
-#################### Helper Function #######################
-def inv_sqrtm_psd(mat: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Symmetric eigendecomposition-based inverse matrix square root."""
-    mat = (mat + mat.transpose(-1, -2)) / 2
-    eigvals, eigvecs = torch.linalg.eigh(mat)
-    eigvals = eigvals.clamp(min=eps)
-    return eigvecs @ torch.diag_embed(eigvals.rsqrt()) @ eigvecs.transpose(-1, -2)
-
-@torch.no_grad()
-def mahalanobis_cost(x: torch.Tensor, anchors: torch.Tensor,
-                      sigmas: torch.Tensor, eps_reg: float = 1e-5) -> torch.Tensor:
-    """
-    C_ik = (x_i - mu_k)^T Sigma_k^{-1} (x_i - mu_k)
- 
-    x:       (B, d)
-    anchors: (K, d)     -> monge_layer.running_mu
-    sigmas:  (K, d, d)  -> monge_layer.running_sigma
- 
-    returns: (B, K) cost matrix
-    """
-    diffs = x.unsqueeze(1) - anchors.unsqueeze(0)          # (B, K, d)
- 
-    sigma_inv_sqrt = inv_sqrtm_psd(sigmas, eps_reg)         # (K, d, d)
-    sigma_inv = torch.einsum('kij,kjl->kil', sigma_inv_sqrt, sigma_inv_sqrt)
- 
-    tmp = torch.einsum('bkd,kde->bke', diffs, sigma_inv)    # (B, K, d)
-    C = (tmp * diffs).sum(-1)                                # (B, K)
-    return C
+from models.norm import mahalanobis_cost, inv_sqrtm_psd, _eigh_robust
 
 #################### Dual Uncertainty #######################
 def combine_lambda(lam_A, lam_B, strategy: str = 'geometric'):
@@ -107,6 +79,7 @@ def _monge_tta_forward(model, data, pos, lam_mode, alpha=1.0, eps_reg=1e-5, stra
       'lambda_b_only'  -- lam_A = 1，lam_B (Sinkhorn-Gibbs transport-plan entrophy)
       'full'           -- lam_A、lam_B batch-wise
     """
+    assert not model.training, "TTA forward must run under eval mode"
     use_monge = getattr(model, "use_monge_norm", False)
 
     if lam_mode == "off" or not use_monge:

@@ -39,7 +39,32 @@ register_resolvers()
 
 
 ### MAIN
+import plotext as plt
 
+def show_lag_curve(monge_norm, domain_ids_to_plot=None, max_domains=5):
+    import pandas as pd
+    if not monge_norm._lag_log:
+        return
+
+    df = pd.DataFrame(monge_norm._lag_log, columns=['step', 'domain_id', 'lag_mu', 'lag_sigma'])
+    domains = domain_ids_to_plot or sorted(df['domain_id'].unique())[:max_domains]
+
+    plt.clf()
+    plt.subplots(1, 2)
+
+    plt.subplot(1, 1)
+    for k in domains:
+        d = df[df.domain_id == k]
+        plt.plot(d['step'].tolist(), d['lag_mu'].tolist(), label=f"domain {k}")
+    plt.title("lag_mu vs step")
+
+    plt.subplot(1, 2)
+    for k in domains:
+        d = df[df.domain_id == k]
+        plt.plot(d['step'].tolist(), d['lag_sigma'].tolist(), label=f"domain {k}")
+    plt.title("lag_sigma vs step")
+
+    plt.show()
 
 def train_stage(  # noqa: C901, PLR0912, PLR0913, PLR0915
     config: DictConfig,
@@ -114,6 +139,12 @@ def train_stage(  # noqa: C901, PLR0912, PLR0913, PLR0915
         val_metrics = test(model, val_loader, device=device, binary=False, amp_dtype=torch_dtype)
         val_acc, val_balanced_acc, val_cohen_kappa, val_f1, val_auroc, val_auc_pr = val_metrics
 
+        if getattr(model, "use_monge_norm", False):
+            try:
+                show_lag_curve(model.monge_norm, max_domains=5)
+            except Exception as e:
+                print(f"[lag plot] skipped due to: {e}")
+                
         if best_val < val_balanced_acc:
             best_val = val_balanced_acc
             test_metrics = test(model, test_loader, device=device, binary=False, amp_dtype=torch_dtype)
@@ -398,7 +429,7 @@ def main(args):  # noqa: C901, PLR0912, PLR0915
         out_shape=out_shape,
         use_monge_norm=args.task.classifier.get("use_monge_norm", True),
         num_domains=num_domains,
-        monge_momentum=args.task.classifier.get("monge_momentum", 0.05),
+        monge_momentum=args.task.classifier.get("monge_momentum", 0.1),
         monge_recompute_every=args.task.classifier.get("monge_recompute_every", 50),
         monge_num_train_samples=monge_num_train_samples,
     )

@@ -17,6 +17,9 @@ from models.lam import LambdaController
 from models.tta import mahalanobis_cost, combine_lambda, softmax_transport_weights
 from utils.model_utils import get_flattened_output_dim
 
+dtype_map = {"fp16": torch.float16, "float16": torch.float16, "bf16": torch.bfloat16, "float32": torch.float32}
+FREQ = 200
+
 register_resolvers()
 
 # python src/dt_stream.py --config-name local_config.yaml --config-dir .
@@ -153,10 +156,13 @@ def main(args):
         noise_ratio=args.encoder.noise_ratio,
     )
 
-    n_chans = args.get("n_chans")
-    n_timepoints = args.get("n_timepoints")
-    if n_chans is None or n_timepoints is None:
-        raise ValueError("n_chans and n_timepoints must be specified in the config")
+    if "n_chans" not in args.task:
+        raise ValueError("n_chans must be specified in the task config")
+    if "duration" not in args.task:
+        raise ValueError("duration must be specified in the task config")
+
+    n_chans = args.task.n_chans
+    n_timepoints = int(args.task.duration * FREQ)
 
     out_shape = None
     if args.task.classifier.pooling == "no":
@@ -177,7 +183,7 @@ def main(args):
         out_shape=out_shape,
         use_monge_norm=args.task.classifier.get("use_monge_norm", True),
         num_domains=monge_shapes["num_domains"],
-        monge_momentum=args.task.classifier.get("monge_momentum", 0.05),
+        monge_momentum=args.task.classifier.get("monge_momentum", 0.1),
         monge_recompute_every=args.task.classifier.get("monge_recompute_every", 50),
         monge_num_train_samples=monge_shapes["num_train_samples"],
     )
@@ -194,7 +200,7 @@ def main(args):
     model.eval()
 
     lmdb_path = args.task.data_loader.dataset.path  
-    lam_modes = ["off", "full"]  
+    lam_modes = ["off", "static", "lambda_b_only", "full"]
 
     for split in ["val", "test"]:
         loader = get_streaming_eval_loader(lmdb_path, split)

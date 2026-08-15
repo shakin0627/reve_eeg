@@ -4,7 +4,7 @@ duration: 10
 
 classifier:
   n_classes: 9
-  pooling: "no"
+  pooling: "last"
 
 data_loader:
   dataset:
